@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="追従カメラ">
+<meta name="theme-color" content="#0a0d0d">
+<title>ドライボックス追従カメラ</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-180.png">
+<style>
+/* 1画面のモニタ型アプリ。映像を全面に、操作は下端の浮いたバーと右側のシートに集約 */
+:root {
+  --bg: #0a0d0d;
+  --panel: #131a19;
+  --panel-2: #1b2422;
+  --line: #2b3633;
+  --fg: #e6ece9;
+  --muted: #94a39e;
+  --accent: #8fd0c3;
+  --accent-ink: #0b1a17;
+  --ok: #6fd08c;
+  --warn: #f0b54a;
+  --lost: #ef7a5a;
+  --font: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 var(--font); overflow: hidden; overscroll-behavior: none; }
+body { -webkit-user-select: none; user-select: none; touch-action: none; }
+[hidden] { display: none !important; }
+button, select, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; background: #000; }
+#vid { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+
+/* ステータス表示（左上・常時） */
+#status {
+  position: fixed; z-index: 5;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: calc(env(safe-area-inset-left, 0px) + 12px);
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px 6px 10px; border-radius: 999px;
+  background: rgba(10, 13, 13, .62); border: 1px solid rgba(255,255,255,.08);
+  font-size: 13px; pointer-events: none;
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+}
+#status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+#status[data-s="track"] .dot { background: var(--ok); }
+#status[data-s="lost"] .dot { background: var(--lost); }
+#status[data-s="pause"] .dot { background: var(--warn); }
+#status .zoom { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
+
+#minimap {
+  position: fixed; z-index: 4;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: calc(env(safe-area-inset-right, 0px) + 12px);
+  width: min(22vw, 220px); border-radius: 6px; border: 1px solid rgba(255,255,255,.18);
+  background: #000; pointer-events: none;
+}
+
+/* 下端の操作バー */
+#bar {
+  position: fixed; z-index: 6; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  display: flex; align-items: stretch; gap: 4px; padding: 6px;
+  border-radius: 18px; background: rgba(19, 26, 25, .86); border: 1px solid var(--line);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  transition: opacity .35s, transform .35s;
+  max-width: calc(100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  overflow-x: auto;
+}
+#bar.away { opacity: 0; transform: translate(-50%, 16px); pointer-events: none; }
+.tb {
+  min-width: 62px; height: 58px; padding: 6px 8px; border: 0; border-radius: 12px; background: transparent;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  font-size: 11px; color: var(--fg); white-space: nowrap;
+}
+.tb svg { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tb:active { background: var(--panel-2); }
+.tb.on { color: var(--accent); }
+.tb.warn { color: var(--warn); }
+.zoomgrp { display: flex; align-items: center; gap: 2px; padding: 0 2px; border-left: 1px solid var(--line); border-right: 1px solid var(--line); margin: 0 2px; }
+.zoomgrp .tb { min-width: 48px; }
+#zoomVal { min-width: 54px; text-align: center; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 17px; }
+#zoomVal small { display: block; font-family: var(--font); font-size: 10px; color: var(--muted); }
+
+/* 色登録パネル */
+#calib {
+  position: fixed; z-index: 7; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  width: min(560px, calc(100vw - 24px)); padding: 14px 16px;
+  border-radius: 16px; background: rgba(19, 26, 25, .94); border: 1px solid var(--line);
+  display: grid; gap: 12px;
+}
+#calib h2 { margin: 0; font-size: 15px; font-weight: 600; }
+#calib p { margin: 0; color: var(--muted); font-size: 13px; }
+.slots { display: flex; gap: 8px; flex-wrap: wrap; }
+.slot {
+  flex: 1 1 140px; display: flex; align-items: center; gap: 10px; padding: 8px 10px; min-height: 48px;
+  border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); text-align: left;
+}
+.slot.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.sw { width: 26px; height: 26px; border-radius: 6px; flex: none; border: 1px dashed var(--muted); }
+.sw.set { border: 1px solid rgba(255,255,255,.35); }
+.slot b { display: block; font-size: 13px; font-weight: 600; }
+.slot span { display: block; font-size: 11px; color: var(--muted); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row .grow { flex: 1 1 auto; }
+
+.btn {
+  min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--panel-2); font-size: 14px;
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.ghost { background: transparent; }
+
+/* 設定シート */
+#sheet {
+  position: fixed; z-index: 8; top: 0; right: 0; bottom: 0;
+  width: min(390px, 100vw);
+  padding: calc(env(safe-area-inset-top, 0px) + 16px) max(18px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 24px) 18px;
+  background: var(--panel); border-left: 1px solid var(--line);
+  overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y;
+  transform: translateX(105%); transition: transform .3s ease;
+}
+#sheet.open { transform: none; }
+#sheet header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+#sheet h2 { margin: 0; font-size: 18px; }
+.sec { padding: 14px 0; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.sec:last-child { border-bottom: 0; }
+.sec > label, .sec .lbl { font-size: 13px; font-weight: 600; letter-spacing: .02em; }
+.sec .note { font-size: 12px; color: var(--muted); margin: 0; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.seg button { flex: 1; min-height: 42px; border: 0; background: transparent; font-size: 13px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.tog { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; }
+.tog span { font-size: 14px; }
+.tog small { display: block; color: var(--muted); font-size: 12px; }
+.tog input { width: 46px; height: 28px; accent-color: var(--accent); flex: none; }
+select.inp { width: 100%; min-height: 42px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); padding: 0 10px; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+/* 開始画面 */
+#start {
+  position: fixed; inset: 0; z-index: 10; overflow-y: auto; touch-action: pan-y;
+  display: grid; place-items: center;
+  padding: calc(env(safe-area-inset-top, 0px) + 24px) max(16px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 24px) max(16px, env(safe-area-inset-left, 0px));
+  background:
+    radial-gradient(ellipse at 50% 40%, rgba(143, 208, 195, .07), transparent 60%),
+    var(--bg);
+}
+.card { width: min(560px, 100%); display: grid; gap: 18px; }
+.reticle { width: 54px; height: 54px; }
+.card h1 { margin: 0; font-size: 24px; letter-spacing: .02em; text-wrap: balance; }
+.card .lead { margin: 0; color: var(--muted); }
+.steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; counter-reset: s; }
+.steps li { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; font-size: 14px; }
+.steps li::before {
+  counter-increment: s; content: counter(s);
+  width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--accent); color: var(--accent);
+  display: grid; place-items: center; font-family: var(--mono); font-size: 12px; margin-top: 1px;
+}
+.steps small { display: block; color: var(--muted); font-size: 12px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.actions .btn.primary { flex: 1 1 200px; min-height: 52px; font-size: 16px; }
+#err { color: var(--lost); font-size: 13px; margin: 0; }
+
+#toast {
+  position: fixed; z-index: 12; left: 50%; transform: translateX(-50%);
+  top: calc(env(safe-area-inset-top, 0px) + 56px);
+  max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 12px;
+  background: rgba(27, 36, 34, .96); border: 1px solid var(--line); font-size: 14px;
+  transition: opacity .3s; pointer-events: none;
+}
+#toast.hide { opacity: 0; }
+#fileIn { display: none; }
+
+/* 横向きスマホなど低い画面では色登録パネルを1段にまとめる */
+@media (max-height: 520px) {
+  #calib {
+    width: min(860px, calc(100vw - 24px)); padding: 10px 12px; gap: 8px 14px; align-items: center;
+    grid-template-columns: auto 1fr auto; grid-template-areas: "h h h" "s r b";
+  }
+  #calib > div:first-child { grid-area: h; }
+  #calib p { display: none; }
+  #calib h2 { font-size: 13px; }
+  #calib .slots { grid-area: s; flex-wrap: nowrap; }
+  #calib .sensrow { grid-area: r; flex-wrap: nowrap; }
+  #calib .btnrow { grid-area: b; flex-wrap: nowrap; }
+  #calib .btnrow .grow { display: none; }
+  .slot { flex: 0 0 auto; min-height: 44px; padding: 6px 10px; }
+  .slot span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #bar, #sheet, #toast { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="stage" aria-label="カメラ映像"></canvas>
+<video id="vid" playsinline muted autoplay></video>
+<canvas id="minimap" hidden></canvas>
+
+<div id="status" data-s="idle" hidden><span class="dot"></span><span id="statusText">準備中</span><span class="zoom" id="statusZoom">×2.0</span></div>
+
+<nav id="bar" hidden>
+  <button class="tb on" id="bTrack" aria-label="追従のオン・オフ">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+    <span>追従中</span>
+  </button>
+  <div class="zoomgrp">
+    <button class="tb" id="bZoomOut" aria-label="縮小"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg><span>引く</span></button>
+    <div id="zoomVal">×2.0<small>倍率</small></div>
+    <button class="tb" id="bZoomIn" aria-label="拡大"><svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></svg><span>寄る</span></button>
+  </div>
+  <button class="tb" id="bOverview" aria-label="全体表示">
+    <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    <span>全体</span>
+  </button>
+  <button class="tb" id="bCalib" aria-label="マーカーの色を登録">
+    <svg viewBox="0 0 24 24"><path d="M4 20l6.5-6.5M14 4l6 6-7.5 7.5-6-6z"/><path d="M9.5 9.5l5 5"/></svg>
+    <span>色登録</span>
+  </button>
+  <button class="tb" id="bSettings" aria-label="設定">
+    <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+    <span>設定</span>
+  </button>
+</nav>
+
+<section id="calib" hidden>
+  <div>
+    <h2>色テープをタップして登録</h2>
+    <p>選んだ枠に登録します。追従に使われる部分が色付きで表示されます。</p>
+  </div>
+  <div class="slots">
+    <button class="slot sel" data-slot="0"><i class="sw" id="sw0"></i><div><b>マーカー A</b><span id="sl0">未登録</span></div></button>
+    <button class="slot" data-slot="1"><i class="sw" id="sw1"></i><div><b>マーカー B</b><span id="sl1">未登録（任意）</span></div></button>
+  </div>
+  <div class="row sensrow">
+    <label class="lbl" for="sensC" style="font-size:13px;white-space:nowrap">感度</label>
+    <input class="grow" type="range" id="sensC" min="0" max="100" step="1">
+  </div>
+  <div class="row btnrow">
+    <button class="btn ghost" id="bClearSlot">この枠を消去</button>
+    <span class="grow"></span>
+    <button class="btn primary" id="bCalibDone">完了</button>
+  </div>
+</section>
+
+<aside id="sheet" aria-label="設定">
+  <header><h2>設定</h2><button class="btn ghost" id="bSheetClose">閉じる</button></header>
+
+  <div class="sec">
+    <span class="lbl">カメラワークの速さ</span>
+    <div class="seg" data-key="speed">
+      <button data-v="vslow">とてもゆっくり</button><button data-v="slow">ゆっくり</button><button data-v="normal">ふつう</button>
+    </div>
+    <p class="note">酔いやすい場合は「とてもゆっくり」。動き出しと止まり際は常に滑らかに減速します。</p>
+  </div>
+
+  <div class="sec">
+    <span class="lbl">遊びの広さ</span>
+    <div class="seg" data-key="dead">
+      <button data-v="narrow">狭い</button><button data-v="mid">標準</button><button data-v="wide">広い</button>
+    </div>
+    <p class="note">鉗子が画面中央付近で動いている間はカメラを動かしません。結紮中に画面が揺れるなら「広い」へ。</p>
+  </div>
+
+  <div class="sec">
+    <label class="tog"><span>自動ズーム<small>鉗子2本が画面に収まるよう倍率を調整（上限は手動の倍率）</small></span><input type="checkbox" id="tAutoZoom"></label>
+    <label class="tog"><span>同じ色を2本に巻いた<small>1色のテープで両方の鉗子を追う場合にオン</small></span><input type="checkbox" id="tSameTwo"></label>
+  </div>
+
+  <div class="sec">
+    <label for="sens">色の感度</label>
+    <input type="range" id="sens" min="0" max="100" step="1">
+    <p class="note">マーカーを見失いやすいなら上げる、背景に反応するなら下げる。</p>
+  </div>
+
+  <div class="sec">
+    <label class="tog"><span>ミニマップ<small>右上に全体像と今映している範囲</small></span><input type="checkbox" id="tMinimap"></label>
+    <label class="tog"><span>検出位置を表示<small>認識したマーカーに印を付ける</small></span><input type="checkbox" id="tMarks"></label>
+  </div>
+
+  <div class="sec">
+    <label for="camSel">カメラ</label>
+    <select class="inp" id="camSel"><option value="">背面カメラ（自動）</option></select>
+    <p class="note">近距離でピントが合わない場合は「超広角」を選ぶと改善することがあります。</p>
+    <p class="note" id="resInfo"></p>
+  </div>
+
+  <div class="sec">
+    <span class="lbl">映像の入力</span>
+    <div class="row">
+      <button class="btn" id="bSrcCam">カメラ</button>
+      <button class="btn" id="bSrcDemo">デモ映像</button>
+      <button class="btn" id="bSrcFile">動画ファイル</button>
+    </div>
+  </div>
+</aside>
+
+<section id="start">
+  <div class="card">
+    <svg class="reticle" viewBox="0 0 54 54" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round">
+      <circle cx="27" cy="27" r="16"/><circle cx="27" cy="27" r="3" fill="var(--accent)" stroke="none"/>
+      <path d="M27 3v8M27 43v8M3 27h8M43 27h8"/>
+    </svg>
+    <h1>ドライボックス追従カメラ</h1>
+    <p class="lead">固定したスマホで箱の中を広く撮り、鉗子先端の色マーカーを追って拡大範囲をゆっくり動かします。</p>
+    <ol class="steps">
+      <li><div>鉗子の先端近くに色テープを巻く<small>緑・青など、ボックス内に無いはっきりした色。2本を別の色にすると安定します。</small></div></li>
+      <li><div>スマホを横向きに固定し、練習範囲全体を映す<small>ズームはアプリ側で行います。カメラは引き気味に。</small></div></li>
+      <li><div>「色登録」でテープの部分をタップ<small>登録した色は次回も保持されます。</small></div></li>
+    </ol>
+    <div class="actions">
+      <button class="btn primary" id="bStart">カメラを開始</button>
+      <button class="btn" id="bDemo">デモで試す</button>
+      <button class="btn" id="bFile">動画ファイルで試す</button>
+    </div>
+    <p id="err" hidden></p>
+  </div>
+</section>
+
+<div id="toast" class="hide" role="status"></div>
+<input type="file" id="fileIn" accept="video/*">
+
+<script>
+'use strict';
+
+/* ---------- 設定 ---------- */
+const SPEED = {           // w: ばねの固有角周波数, v: 最高速度(表示幅/秒), zv: ズーム速度(log/秒)
+  vslow:  { w: 1.1, v: 0.22, zv: 0.16 },
+  slow:   { w: 1.8, v: 0.40, zv: 0.26 },
+  normal: { w: 3.0, v: 0.75, zv: 0.45 },
+};
+const DEAD = { narrow: 0.25, mid: 0.42, wide: 0.6 };   // 遊び（表示半幅に対する比）
+const STOP_R = 0.12;      // ここまで寄ったら追いかけを止める
+const LOST_MS = 450;      // この時間見えなければ「見失い」
+const ZMIN = 1, ZMAX = 5, ZSTEP = 0.25;
+
+const KEY = 'dbtc.v1';
+function defaults() {
+  return { speed: 'slow', dead: 'mid', autoZoom: false, sameTwo: false, sens: 50,
+           minimap: true, marks: false, zoom: 2, deviceId: '', markers: [null, null] };
+}
+let S = defaults();
+try { const j = JSON.parse(localStorage.getItem(KEY) || 'null'); if (j) S = Object.assign(defaults(), j); } catch (e) {}
+function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+
+/* ---------- 要素 ---------- */
+const $ = (s) => document.querySelector(s);
+const cv = $('#stage'), ctx = cv.getContext('2d');
+const mm = $('#minimap'), mctx = mm.getContext('2d');
+const video = $('#vid');
+const calibEl = $('#calib');
+
+/* ---------- 状態 ---------- */
+let src = null, srcKind = '', stream = null;
+let mode = 'view';        // 'view' | 'calib'
+let overview = false;
+let tracking = true;
+let calibSlot = 0;
+const cam = { x: .5, y: .5, vx: 0, vy: 0, lz: Math.log(S.zoom), lzv: 0 };
+const goal = { x: .5, y: .5 };
+let moving = false;
+let autoZ = S.zoom;
+const trk = { has: false, x: .5, y: .5, lastSeen: -1e9, pts: [] };
+let view = { sx: 0, sy: 0, sw: 1, sh: 1, dx: 0, dy: 0, dw: 1, dh: 1 };
+
+function srcW() { return src === video ? video.videoWidth : (src ? src.width : 0); }
+function srcH() { return src === video ? video.videoHeight : (src ? src.height : 0); }
+
+/* ---------- 色 ---------- */
+function rgb2hsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) {
+    if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  return { h, s: mx ? d / mx : 0, v: mx };
+}
+let demoMarkers = null;
+function curMarkers() { return srcKind === 'demo' ? demoMarkers : S.markers; }
+function saveMarkers() { if (srcKind !== 'demo') save(); }
+function thresholds(m, bit) {
+  const k = S.sens / 100;
+  return { bit, h: m.h,
+    hTol: 7 + k * 28,
+    sMin: Math.max(0.16, m.s * (0.78 - k * 0.42)),
+    vMin: Math.max(0.10, m.v * (0.62 - k * 0.4)) };
+}
+function activeMarkers() {
+  const out = [];
+  curMarkers().forEach((m, i) => { if (m) out.push(thresholds(m, 1 << i)); });
+  return out;
+}
+// 現在の画面のうち、この色に一致する画素の割合
+function coverage(m) {
+  const t = thresholds(m, 1), d = aData, n = AW * AH;
+  let c = 0;
+  for (let p = 0; p < n * 4; p += 4) {
+    const hsv = rgb2hsv(d[p], d[p + 1], d[p + 2]);
+    let dh = Math.abs(hsv.h - t.h); if (dh > 180) dh = 360 - dh;
+    if (dh <= t.hTol && hsv.s >= t.sMin && hsv.v >= t.vMin) c++;
+  }
+  return c / n;
+}
+
+/* ---------- 解析（低解像度で色マーカーを検出） ---------- */
+const AW = 160;
+let AH = 0, aData = null, bits = null, lab = null, stk = null;
+const acv = document.createElement('canvas');
+const actx = acv.getContext('2d', { willReadFrequently: true });
+const maskCv = document.createElement('canvas'), maskCtx = maskCv.getContext('2d');
+let maskImg = null;
+
+function components(bit, minA) {
+  lab.fill(0);
+  const out = [], W = AW, H = AH, n = W * H;
+  let id = 0;
+  for (let i = 0; i < n; i++) {
+    if (!(bits[i] & bit) || lab[i]) continue;
+    id++;
+    let sp = 0, a = 0, sx = 0, sy = 0;
+    stk[sp++] = i; lab[i] = id;
+    while (sp) {
+      const j = stk[--sp], x = j % W, y = (j / W) | 0;
+      a++; sx += x; sy += y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx; if (xx < 0 || xx >= W) continue;
+          const k = yy * W + xx;
+          if (!lab[k] && (bits[k] & bit)) { lab[k] = id; stk[sp++] = k; }
+        }
+      }
+    }
+    if (a >= minA) out.push({ a, x: (sx / a + .5) / W, y: (sy / a + .5) / H, bit });
+  }
+  return out;
+}
+
+function analyze() {
+  const sw = srcW(), sh = srcH();
+  const ah = Math.max(16, Math.round(AW * sh / sw));
+  if (ah !== AH) {
+    AH = ah; acv.width = AW; acv.height = AH; maskCv.width = AW; maskCv.height = AH;
+    bits = new Uint8Array(AW * AH); lab = new Int32Array(AW * AH); stk = new Int32Array(AW * AH);
+    maskImg = maskCtx.createImageData(AW, AH);
+  }
+  actx.drawImage(src, 0, 0, AW, AH);
+  aData = actx.getImageData(0, 0, AW, AH).data;
+  bits.fill(0);
+  const ms = activeMarkers();
+  if (!ms.length) return [];
+  const n = AW * AH, d = aData;
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const r = d[p], g = d[p + 1], b = d[p + 2];
+    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (mx < 22) continue;
+    const mn = r < g ? (r < b ? r : b) : (g < b ? g : b), df = mx - mn;
+    const s = df / mx; if (s < 0.14) continue;
+    let h;
+    if (mx === r) h = ((g - b) / df) % 6; else if (mx === g) h = (b - r) / df + 2; else h = (r - g) / df + 4;
+    h *= 60; if (h < 0) h += 360;
+    const v = mx / 255;
+    for (let q = 0; q < ms.length; q++) {
+      const m = ms[q];
+      let dh = h > m.h ? h - m.h : m.h - h; if (dh > 180) dh = 360 - dh;
+      if (dh <= m.hTol && s >= m.sMin && v >= m.vMin) bits[i] |= m.bit;
+    }
+  }
+  const minA = Math.max(5, Math.round(n * 0.0003));
+  const pts = [];
+  for (const m of ms) {
+    const bl = components(m.bit, minA).sort((a, b) => b.a - a.a);
+    if (!bl.length) continue;
+    pts.push(bl[0]);
+    if (S.sameTwo && bl[1] && bl[1].a >= bl[0].a * 0.2) pts.push(bl[1]);
+  }
+  return pts;
+}
+
+function buildMask() {
+  const px = maskImg.data, cols = curMarkers().map((m) => m ? m.rgb : null);
+  for (let i = 0, p = 0; i < bits.length; i++, p += 4) {
+    const b = bits[i];
+    const c = (b & 1) ? cols[0] : (b & 2) ? cols[1] : null;
+    if (c) { px[p] = c[0]; px[p + 1] = c[1]; px[p + 2] = c[2]; px[p + 3] = 235; } else px[p + 3] = 0;
+  }
+  maskCtx.putImageData(maskImg, 0, 0);
+}
+
+/* ---------- カメラワーク ---------- */
+function baseCrop() {
+  const As = cv.width / cv.height, Av = srcW() / srcH();
+  return As > Av ? { bw: 1, bh: Av / As } : { bw: As / Av, bh: 1 };
+}
+function clampCenter(p, cw, ch) {
+  p.x = Math.min(Math.max(p.x, cw / 2), 1 - cw / 2);
+  p.y = Math.min(Math.max(p.y, ch / 2), 1 - ch / 2);
+}
+
+function updateTarget(pts, dt, now) {
+  trk.pts = pts;
+  if (pts.length) {
+    let x = 0, y = 0;
+    for (const p of pts) { x += p.x; y += p.y; }
+    x /= pts.length; y /= pts.length;
+    if (!trk.has) { trk.x = x; trk.y = y; }
+    else { const a = 1 - Math.exp(-dt / 0.12); trk.x += (x - trk.x) * a; trk.y += (y - trk.y) * a; }
+    trk.has = true; trk.lastSeen = now;
+  } else if (now - trk.lastSeen > LOST_MS) {
+    trk.has = false;
+  }
+}
+
+function updateCamera(dt) {
+  const P = SPEED[S.speed] || SPEED.slow;
+  const b = baseCrop();
+
+  // ズーム目標
+  let zg = S.zoom;
+  if (S.autoZoom) {
+    if (tracking && trk.pts.length >= 2) {
+      let x0 = 1, x1 = 0, y0 = 1, y1 = 0;
+      for (const p of trk.pts) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+      const fit = Math.min(0.6 * b.bw / Math.max(x1 - x0, 1e-3), 0.6 * b.bh / Math.max(y1 - y0, 1e-3));
+      const z = Math.min(Math.max(fit, ZMIN), S.zoom);
+      if (Math.abs(Math.log(z / autoZ)) > 0.18) autoZ = z;
+    }
+    autoZ = Math.min(autoZ, S.zoom);
+    zg = autoZ;
+  }
+  const wz = P.w * 0.8;
+  cam.lzv += (wz * wz * (Math.log(zg) - cam.lz) - 2 * wz * cam.lzv) * dt;
+  cam.lzv = Math.max(-P.zv, Math.min(P.zv, cam.lzv));
+  cam.lz += cam.lzv * dt;
+  const z = Math.exp(cam.lz), cw = b.bw / z, ch = b.bh / z;
+
+  // 位置目標（遊び＋ヒステリシス）
+  if (tracking && trk.has) {
+    const ex = (trk.x - cam.x) / (cw / 2), ey = (trk.y - cam.y) / (ch / 2);
+    const e = Math.hypot(ex, ey);
+    if (!moving && e > DEAD[S.dead]) moving = true;
+    if (moving) { goal.x = trk.x; goal.y = trk.y; if (e < STOP_R) moving = false; }
+  } else {
+    moving = false;
+  }
+  clampCenter(goal, cw, ch);
+
+  // 臨界減衰ばね＋速度上限（急発進・急停止しない）
+  const w = P.w;
+  cam.vx += (w * w * (goal.x - cam.x) - 2 * w * cam.vx) * dt;
+  cam.vy += (w * w * (goal.y - cam.y) - 2 * w * cam.vy) * dt;
+  const vmax = P.v * cw, sp = Math.hypot(cam.vx, cam.vy);
+  if (sp > vmax) { cam.vx *= vmax / sp; cam.vy *= vmax / sp; }
+  cam.x += cam.vx * dt; cam.y += cam.vy * dt;
+  const bx = cam.x, by = cam.y;
+  clampCenter(cam, cw, ch);
+  if (cam.x !== bx) cam.vx = 0;
+  if (cam.y !== by) cam.vy = 0;
+}
+
+/* ---------- 描画 ---------- */
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+}
+addEventListener('resize', resize);
+
+function render() {
+  const W = cv.width, H = cv.height, sw = srcW(), sh = srcH();
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (!sw || !sh) return;
+  const full = overview || mode === 'calib';
+  const b = baseCrop(), z = Math.exp(cam.lz), cw = b.bw / z, ch = b.bh / z;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  if (full) {
+    // 色登録中はパネルに隠れないよう、その上の領域に全体を収める
+    const reserve = mode === 'calib' ? (calibEl.offsetHeight + 24) * dpr : 0;
+    const AHt = Math.max(H * 0.4, H - reserve);
+    const sc = Math.min(W / sw, AHt / sh), dw = sw * sc, dh = sh * sc;
+    view = { sx: 0, sy: 0, sw: 1, sh: 1, dx: (W - dw) / 2, dy: (AHt - dh) / 2, dw, dh };
+  } else {
+    view = { sx: cam.x - cw / 2, sy: cam.y - ch / 2, sw: cw, sh: ch, dx: 0, dy: 0, dw: W, dh: H };
+  }
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, view.sx * sw, view.sy * sh, view.sw * sw, view.sh * sh, view.dx, view.dy, view.dw, view.dh);
+
+  const toX = (u) => view.dx + (u - view.sx) / view.sw * view.dw;
+  const toY = (v) => view.dy + (v - view.sy) / view.sh * view.dh;
+
+  if (mode === 'calib' && bits) {
+    buildMask();
+    ctx.imageSmoothingEnabled = false;
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(maskCv, view.dx, view.dy, view.dw, view.dh);
+    ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = true;
+  }
+  if (full && mode !== 'calib') {
+    ctx.strokeStyle = 'rgba(143,208,195,.9)'; ctx.lineWidth = 2 * dpr; ctx.setLineDash([8 * dpr, 6 * dpr]);
+    ctx.strokeRect(toX(cam.x - cw / 2), toY(cam.y - ch / 2), cw / view.sw * view.dw, ch / view.sh * view.dh);
+    ctx.setLineDash([]);
+  }
+  if (S.marks || mode === 'calib') {
+    ctx.lineWidth = 2 * dpr;
+    for (const p of trk.pts) {
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath(); ctx.arc(toX(p.x), toY(p.y), 14 * dpr, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (trk.has) {
+      const x = toX(trk.x), y = toY(trk.y), r = 7 * dpr;
+      ctx.strokeStyle = 'rgba(143,208,195,.95)';
+      ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); ctx.stroke();
+    }
+  }
+  renderMinimap(cw, ch);
+}
+
+function renderMinimap(cw, ch) {
+  const show = S.minimap && !overview && mode === 'view';
+  if (mm.hidden === show) mm.hidden = !show;
+  if (!show) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cssW = mm.getBoundingClientRect().width || 200;
+  const w = Math.round(cssW * dpr), h = Math.round(w * srcH() / srcW());
+  if (mm.width !== w || mm.height !== h) { mm.width = w; mm.height = h; mm.style.height = (h / dpr) + 'px'; }
+  mctx.drawImage(src, 0, 0, w, h);
+  mctx.strokeStyle = 'rgba(143,208,195,1)'; mctx.lineWidth = 2 * dpr;
+  mctx.strokeRect((cam.x - cw / 2) * w, (cam.y - ch / 2) * h, cw * w, ch * h);
+  mctx.fillStyle = '#fff';
+  for (const p of trk.pts) { mctx.beginPath(); mctx.arc(p.x * w, p.y * h, 3 * dpr, 0, Math.PI * 2); mctx.fill(); }
+}
+
+/* ---------- ループ ---------- */
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, Math.max(0.001, (t - lastT) / 1000 || 0.016));
+  lastT = t;
+  resize();
+  if (srcKind === 'demo') drawDemo(t / 1000);
+  if (!src || !srcW() || !srcH()) return;
+  if (src === video && video.readyState < 2) return;
+  const pts = analyze();
+  updateTarget(pts, dt, t);
+  updateCamera(dt);
+  render();
+  updateStatus();
+}
+requestAnimationFrame(frame);
+
+/* ---------- UI ---------- */
+const statusEl = $('#status'), statusText = $('#statusText'), statusZoom = $('#statusZoom');
+let lastStatus = '';
+function updateStatus() {
+  let s, txt;
+  if (!curMarkers()[0] && !curMarkers()[1]) { s = 'idle'; txt = '色が未登録'; }
+  else if (!tracking) { s = 'pause'; txt = '追従を停止中'; }
+  else if (!trk.has) { s = 'lost'; txt = 'マーカーを見失い（位置を保持）'; }
+  else { s = 'track'; txt = '追従中'; }
+  const z = '×' + Math.exp(cam.lz).toFixed(1);
+  const key = s + txt + z;
+  if (key === lastStatus) return;
+  lastStatus = key;
+  statusEl.dataset.s = s; statusText.textContent = txt; statusZoom.textContent = z;
+}
+
+let toastT = 0;
+function toast(msg, ms = 2600) {
+  const el = $('#toast'); el.textContent = msg; el.classList.remove('hide');
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.add('hide'), ms);
+}
+
+// 操作バーは5秒触らなければ隠す。画面タップで再表示
+const bar = $('#bar');
+let barT = 0;
+function pokeBar() {
+  bar.classList.remove('away');
+  clearTimeout(barT);
+  barT = setTimeout(() => { if (mode === 'view' && !sheetOpen) bar.classList.add('away'); }, 5000);
+}
+
+function syncZoomUI() {
+  const z = Number.isInteger(S.zoom) ? S.zoom.toFixed(1) : String(+S.zoom.toFixed(2));
+  $('#zoomVal').innerHTML = '×' + z + '<small>' + (S.autoZoom ? '上限' : '倍率') + '</small>';
+}
+function setZoom(z) {
+  S.zoom = Math.round(Math.min(ZMAX, Math.max(ZMIN, z)) / ZSTEP) * ZSTEP;
+  if (!S.autoZoom) autoZ = S.zoom;
+  save(); syncZoomUI(); pokeBar();
+}
+$('#bZoomIn').onclick = () => setZoom(S.zoom + ZSTEP);
+$('#bZoomOut').onclick = () => setZoom(S.zoom - ZSTEP);
+
+function syncTrackUI() {
+  const b = $('#bTrack');
+  b.classList.toggle('on', tracking); b.classList.toggle('warn', !tracking);
+  b.querySelector('span').textContent = tracking ? '追従中' : '停止中';
+}
+$('#bTrack').onclick = () => {
+  tracking = !tracking;
+  if (!tracking) { moving = false; goal.x = cam.x; goal.y = cam.y; toast('追従を停止しました。画面をドラッグで手動移動できます'); }
+  syncTrackUI(); pokeBar();
+};
+$('#bOverview').onclick = () => {
+  overview = !overview;
+  $('#bOverview').classList.toggle('on', overview);
+  $('#bOverview').querySelector('span').textContent = overview ? '戻る' : '全体';
+  pokeBar();
+};
+
+/* 色登録 */
+function syncSlots() {
+  for (let i = 0; i < 2; i++) {
+    const m = curMarkers()[i], sw = $('#sw' + i);
+    sw.classList.toggle('set', !!m);
+    sw.style.background = m ? `rgb(${m.rgb.join(',')})` : 'transparent';
+    $('#sl' + i).textContent = m ? '登録済み' : (i ? '未登録（任意）' : '未登録');
+    document.querySelector(`.slot[data-slot="${i}"]`).classList.toggle('sel', i === calibSlot);
+  }
+}
+function enterCalib() {
+  mode = 'calib'; overview = false;
+  $('#bOverview').classList.remove('on'); $('#bOverview').querySelector('span').textContent = '全体';
+  const M = curMarkers();
+  calibSlot = M[0] ? (M[1] ? 0 : 1) : 0;
+  $('#calib').hidden = false; bar.hidden = true;
+  $('#sensC').value = S.sens;
+  syncSlots();
+}
+function exitCalib() {
+  mode = 'view'; $('#calib').hidden = true; bar.hidden = false; pokeBar();
+  if (!curMarkers()[0] && !curMarkers()[1]) toast('色が未登録のため追従しません');
+}
+$('#bCalib').onclick = enterCalib;
+$('#bCalibDone').onclick = exitCalib;
+document.querySelectorAll('.slot').forEach((el) => el.onclick = () => { calibSlot = +el.dataset.slot; syncSlots(); });
+$('#bClearSlot').onclick = () => { curMarkers()[calibSlot] = null; saveMarkers(); syncSlots(); };
+$('#sensC').oninput = (e) => { S.sens = +e.target.value; $('#sens').value = S.sens; save(); };
+
+function sampleAt(px, py) {
+  if (!aData) return;
+  const u = view.sx + (px - view.dx) / view.dw * view.sw;
+  const v = view.sy + (py - view.dy) / view.dh * view.sh;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return;
+  const cx = Math.min(AW - 1, Math.floor(u * AW)), cy = Math.min(AH - 1, Math.floor(v * AH));
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = cy - 1; y <= cy + 1; y++) for (let x = cx - 1; x <= cx + 1; x++) {
+    if (x < 0 || y < 0 || x >= AW || y >= AH) continue;
+    const p = (y * AW + x) * 4; r += aData[p]; g += aData[p + 1]; b += aData[p + 2]; n++;
+  }
+  r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
+  const hsv = rgb2hsv(r, g, b);
+  if (hsv.s < 0.22 || hsv.v < 0.15) {
+    toast('色がはっきりしないため登録できません。緑・青など鮮やかなテープの中央をタップしてください', 4000);
+    return;
+  }
+  const cand = { h: hsv.h, s: hsv.s, v: hsv.v, rgb: [r, g, b] };
+  if (coverage(cand) > 0.08) {
+    toast('この色は画面の広い範囲にあるため、背景と区別できません。テープ部分をタップするか、背景に無い色のテープを使ってください', 4500);
+    return;
+  }
+  const M = curMarkers();
+  M[calibSlot] = cand;
+  saveMarkers();
+  toast(calibSlot ? 'マーカー B を登録しました' : 'マーカー A を登録しました');
+  if (!M[1 - calibSlot]) calibSlot = 1 - calibSlot;
+  syncSlots();
+}
+
+/* 画面タッチ：色登録時は色の取得、停止中はドラッグで手動移動、それ以外はバー表示 */
+let down = null;
+cv.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, moved: false }; });
+cv.addEventListener('pointermove', (e) => {
+  if (!down) return;
+  if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 8) down.moved = true;
+  if (down.moved && !tracking && mode === 'view' && !overview && srcW()) {
+    const b = baseCrop(), z = Math.exp(cam.lz), cw = b.bw / z, ch = b.bh / z;
+    cam.x -= (e.clientX - down.lx) / innerWidth * cw;
+    cam.y -= (e.clientY - down.ly) / innerHeight * ch;
+    clampCenter(cam, cw, ch);
+    cam.vx = cam.vy = 0; goal.x = cam.x; goal.y = cam.y;
+  }
+  down.lx = e.clientX; down.ly = e.clientY;
+});
+cv.addEventListener('pointerup', (e) => {
+  if (!down) return;
+  const moved = down.moved; down = null;
+  if (moved) return;
+  if (mode === 'calib') { const dpr = Math.min(window.devicePixelRatio || 1, 2); sampleAt(e.clientX * dpr, e.clientY * dpr); }
+  else if (sheetOpen) closeSheet();
+  else pokeBar();
+});
+cv.addEventListener('pointercancel', () => { down = null; });
+
+/* 設定シート */
+let sheetOpen = false;
+const sheet = $('#sheet');
+function openSheet() { sheetOpen = true; sheet.classList.add('open'); bar.classList.add('away'); syncSheet(); refreshCams(); }
+function closeSheet() { sheetOpen = false; sheet.classList.remove('open'); pokeBar(); }
+$('#bSettings').onclick = openSheet;
+$('#bSheetClose').onclick = closeSheet;
+
+function syncSheet() {
+  document.querySelectorAll('.seg').forEach((seg) => {
+    seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(S[seg.dataset.key] === b.dataset.v)));
+  });
+  $('#tAutoZoom').checked = S.autoZoom; $('#tSameTwo').checked = S.sameTwo;
+  $('#tMinimap').checked = S.minimap; $('#tMarks').checked = S.marks;
+  $('#sens').value = S.sens;
+  $('#resInfo').textContent = srcW() ? `入力解像度 ${srcW()}×${srcH()}` : '';
+}
+document.querySelectorAll('.seg').forEach((seg) => {
+  seg.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    S[seg.dataset.key] = b.dataset.v; save(); syncSheet();
+  });
+});
+$('#tAutoZoom').onchange = (e) => { S.autoZoom = e.target.checked; autoZ = S.zoom; save(); syncZoomUI(); };
+$('#tSameTwo').onchange = (e) => { S.sameTwo = e.target.checked; save(); };
+$('#tMinimap').onchange = (e) => { S.minimap = e.target.checked; save(); };
+$('#tMarks').onchange = (e) => { S.marks = e.target.checked; save(); };
+$('#sens').oninput = (e) => { S.sens = +e.target.value; save(); };
+
+async function refreshCams() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    const sel = $('#camSel');
+    sel.innerHTML = '<option value="">背面カメラ（自動）</option>' +
+      devs.map((d, i) => `<option value="${d.deviceId}">${(d.label || 'カメラ ' + (i + 1)).replace(/[<&>"]/g, '')}</option>`).join('');
+    sel.value = devs.some((d) => d.deviceId === S.deviceId) ? S.deviceId : '';
+  } catch (e) {}
+}
+$('#camSel').onchange = async (e) => {
+  S.deviceId = e.target.value; save();
+  try { await startCamera(); syncSheet(); } catch (err) { toast(camError(err), 4000); }
+};
+
+/* ---------- 入力ソース ---------- */
+let wakeLock = null;
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && src) keepAwake(); });
+
+function stopSource() {
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  if (video.src) { URL.revokeObjectURL(video.src); video.removeAttribute('src'); }
+  video.srcObject = null;
+  src = null; srcKind = '';
+  trk.has = false; trk.pts = []; moving = false;
+}
+function resetCam() {
+  cam.x = cam.y = goal.x = goal.y = .5; cam.vx = cam.vy = 0;
+  cam.lz = Math.log(S.zoom); cam.lzv = 0; autoZ = S.zoom;
+}
+function camError(err) {
+  if (!window.isSecureContext) return 'カメラは https のページでのみ使えます。https のアドレスで開いてください。';
+  const n = err && err.name;
+  if (n === 'NotAllowedError') return 'カメラの使用が許可されていません。ブラウザの設定でこのサイトのカメラを「許可」にしてから再読み込みしてください。';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'カメラが見つかりません。設定でカメラを選び直してください。';
+  if (n === 'NotReadableError') return '他のアプリがカメラを使用中です。そのアプリを閉じてからやり直してください。';
+  return 'カメラを開始できませんでした（' + (n || err) + '）';
+}
+async function startCamera() {
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('insecure');
+  stopSource();
+  const base = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+  const video_c = S.deviceId ? Object.assign({ deviceId: { exact: S.deviceId } }, base)
+                             : Object.assign({ facingMode: { ideal: 'environment' } }, base);
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: video_c }); }
+  catch (e) {
+    if (S.deviceId && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
+      S.deviceId = ''; save();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({ facingMode: { ideal: 'environment' } }, base) });
+    } else throw e;
+  }
+  video.srcObject = stream;
+  await video.play();
+  src = video; srcKind = 'camera';
+  resetCam(); keepAwake(); refreshCams();
+}
+async function startFile(f) {
+  stopSource();
+  video.src = URL.createObjectURL(f);
+  video.loop = true; video.muted = true;
+  await video.play();
+  src = video; srcKind = 'file';
+  resetCam(); keepAwake();
+}
+
+/* ---------- デモ映像（鉗子2本が結紮点を順に移動する合成映像） ---------- */
+const demo = document.createElement('canvas'); demo.width = 1280; demo.height = 720;
+const dctx = demo.getContext('2d');
+const DEMO_PTS = [[330, 250], [640, 220], [950, 270], [900, 500], [620, 520], [340, 470]];
+const DEMO_COLORS = { a: [46, 190, 92], b: [40, 120, 226] };
+function drawDemo(t) {
+  const g = dctx;
+  g.fillStyle = '#2a1d1a'; g.fillRect(0, 0, 1280, 720);
+  const rg = g.createRadialGradient(640, 380, 120, 640, 380, 760);
+  rg.addColorStop(0, '#d9a99a'); rg.addColorStop(1, '#5b3a33');
+  g.fillStyle = rg; g.fillRect(90, 90, 1100, 560);
+  // 練習台の目印（結紮点）
+  DEMO_PTS.forEach(([x, y], i) => {
+    g.fillStyle = '#f4e3d8'; g.beginPath(); g.ellipse(x, y, 46, 18, 0, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#a65a4c'; g.lineWidth = 4; g.beginPath(); g.moveTo(x - 40, y); g.lineTo(x + 40, y); g.stroke();
+    g.fillStyle = '#6b3a32'; g.font = '600 22px system-ui'; g.fillText(String(i + 1), x - 6, y - 26);
+  });
+  // 目標点の移動（7秒ごと、1.6秒かけて移動）
+  const per = 7, k = Math.floor(t / per), f = (t % per);
+  const a = DEMO_PTS[k % DEMO_PTS.length], b = DEMO_PTS[(k + 1) % DEMO_PTS.length];
+  const m = Math.min(1, Math.max(0, (f - (per - 1.6)) / 1.6)), e = m * m * (3 - 2 * m);
+  const tx = a[0] + (b[0] - a[0]) * e, ty = a[1] + (b[1] - a[1]) * e;
+  const wob = (s, p) => Math.sin(t * s + p) * 16;
+  drawInst(g, [-60, 760], [tx - 46 + wob(2.3, 0), ty + 14 + wob(3.1, 1)], DEMO_COLORS.a);
+  drawInst(g, [1340, 760], [tx + 46 + wob(2.7, 2), ty + 14 + wob(2.1, 3)], DEMO_COLORS.b);
+  g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(0, 0, 1280, 38);
+  g.fillStyle = '#fff'; g.font = '20px system-ui'; g.fillText('デモ映像（合成）', 16, 26);
+}
+function drawInst(g, [x0, y0], [x1, y1], col) {
+  const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy), ux = dx / L, uy = dy / L;
+  g.lineCap = 'round';
+  g.strokeStyle = '#3c4146'; g.lineWidth = 22; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1 - ux * 20, y1 - uy * 20); g.stroke();
+  g.strokeStyle = '#8b939b'; g.lineWidth = 6; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1 - ux * 20, y1 - uy * 20); g.stroke();
+  g.strokeStyle = `rgb(${col.join(',')})`; g.lineWidth = 24; g.lineCap = 'butt';
+  g.beginPath(); g.moveTo(x1 - ux * 78, y1 - uy * 78); g.lineTo(x1 - ux * 34, y1 - uy * 34); g.stroke();
+  g.strokeStyle = '#b9c0c6'; g.lineWidth = 5; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(x1 - ux * 22, y1 - uy * 22); g.lineTo(x1 - uy * 6, y1 + ux * 6);
+  g.moveTo(x1 - ux * 22, y1 - uy * 22); g.lineTo(x1 + uy * 6, y1 - ux * 6); g.stroke();
+}
+function startDemo() {
+  stopSource();
+  src = demo; srcKind = 'demo';
+  demoMarkers = [DEMO_COLORS.a, DEMO_COLORS.b].map((c) => Object.assign(rgb2hsv(c[0], c[1], c[2]), { rgb: c }));
+  resetCam(); keepAwake();
+}
+
+/* ---------- 開始 ---------- */
+function enterApp() {
+  $('#start').hidden = true; statusEl.hidden = false; bar.hidden = false;
+  syncZoomUI(); syncTrackUI(); pokeBar();
+  if (!curMarkers()[0] && !curMarkers()[1]) setTimeout(enterCalib, 400);
+}
+function showErr(msg) { const el = $('#err'); el.textContent = msg; el.hidden = false; }
+$('#bStart').onclick = async () => {
+  try { await startCamera(); enterApp(); } catch (err) { showErr(camError(err)); }
+};
+$('#bDemo').onclick = () => { startDemo(); enterApp(); toast('合成映像のデモです。緑と青のテープを追従します'); };
+$('#bFile').onclick = () => $('#fileIn').click();
+$('#bSrcFile').onclick = () => $('#fileIn').click();
+$('#fileIn').onchange = async (e) => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try { await startFile(f); if (!$('#start').hidden) enterApp(); closeSheet(); }
+  catch (err) { toast('この動画は再生できませんでした', 3500); }
+};
+$('#bSrcCam').onclick = async () => { try { await startCamera(); closeSheet(); } catch (err) { toast(camError(err), 4000); } };
+$('#bSrcDemo').onclick = () => { startDemo(); closeSheet(); };
+
+$('#sens').value = S.sens;
+syncZoomUI();
+</script>
+</body>
+</html>
